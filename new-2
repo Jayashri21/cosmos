@@ -1,0 +1,36 @@
+# Copyright (C) 2024 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+import os
+
+UPLOADED_FILES_PATH = os.getenv("UPLOADED_FILES_PATH", "./uploaded_files/")
+
+
+AZURE_COSMOSDB_URI =  os.getenv("AZURE_COSMOSDB_URI" , "https://cosmos3.documents.azure.com:443/")
+
+
+# Embedding model
+EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+
+
+# TEI Embedding endpoints
+TEI_ENDPOINT = os.getenv("TEI_ENDPOINT", "")
+
+# Vector Index Configuration
+INDEX_NAME = os.getenv("INDEX_NAME", "rag-elastic")
+
+
+
+TEXT_KEY = os.getenv("TEXT_KEY", "/text")
+EMBEDDING_KEY = os.getenv("EMBEDDING_KEY", "/embedding")
+PARTITION_KEY = os.getenv("PARTITION_KEY", "/id")
+
+# chunk parameters
+CHUNK_SIZE = os.getenv("CHUNK_SIZE", 1500)
+CHUNK_OVERLAP = os.getenv("CHUNK_OVERLAP", 100)
+
+# Logging enabled
+LOG_FLAG = os.getenv("LOGFLAG", False)
+
+DB_NAME = os.getenv("DB_NAME" , "vectorSearchDB")
+CONTAINER_NAME = os.getenv("CONTAINER_NAME" , "vectorSearchContainer")
