@@ -1,0 +1,538 @@
+from http.client import HTTPException
+import sys
+from azure.cosmos import CosmosClient, PartitionKey, exceptions
+import os
+from typing import List, Optional, Union
+import json
+from langchain.text_splitter import HTMLHeaderTextSplitter, RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_huggingface.embeddings import HuggingFaceEndpointEmbeddings
+from fastapi import  UploadFile, File, HTTPException, Form
+from langchain_community.vectorstores.azure_cosmos_db_no_sql import (
+    AzureCosmosDBNoSqlVectorSearch,
+)
+
+from config import (
+    EMBED_MODEL,
+    AZURE_COSMOSDB_URI, 
+    KEY,
+    DB_NAME, 
+    CONTAINER_NAME, 
+    LOG_FLAG, 
+    TEI_ENDPOINT,
+    TEXT_KEY,
+    EMBEDDING_KEY,
+    PARTITION_KEY,
+    CHUNK_SIZE,
+    CHUNK_OVERLAP,
+    UPLOADED_FILES_PATH
+)
+
+from pathlib import Path
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from comps import CustomLogger, DocPath, opea_microservices, register_microservice
+
+from comps.dataprep.utils import (
+    create_upload_folder,
+    document_loader,
+    encode_filename,
+    get_separators,
+    get_tables_result,
+    parse_html,
+    remove_folder_with_ignore,
+    save_content_to_local_disk,
+)
+
+
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+
+# Logger Setup
+logger = CustomLogger(__name__)
+
+
+
+def get_embedder() -> Union[HuggingFaceEndpointEmbeddings, HuggingFaceEmbeddings]:
+    """Obtain required Embedder."""
+
+    if TEI_ENDPOINT:
+        return HuggingFaceEndpointEmbeddings(model=TEI_ENDPOINT)
+    else:
+        return HuggingFaceEmbeddings(model_name=EMBED_MODEL)
+
+embedder = get_embedder()
+
+indexing_policy = {
+    "indexingMode": "consistent",
+    "automatic": True,
+    "includedPaths": [{"path": "/*", "indexes" : []}],
+    "excludedPaths": [{"path": '/"_etag"/?'}],
+    "vectorIndexes": [{"path": EMBEDDING_KEY, "type": "diskANN"}],
+    "fullTextIndexes": [{"path":TEXT_KEY, "language": "en-US"}],
+}
+
+vector_embedding_policy = {
+    "vectorEmbeddings": [
+        {
+            "path": EMBEDDING_KEY,
+            "dataType": "float32",
+            "distanceFunction": "cosine",
+            "dimensions": len(embedder.embed_query("Hello"))
+        }
+    ]
+}
+
+full_text_policy = {
+
+    "fullTextPaths": [{"path": TEXT_KEY, "language": "en-US"}],
+}
+
+
+
+
+def create_database_if_not_exists(client, database_name):
+    """Create database if it doesn't exist."""
+    try:
+        return client.create_database(database_name)
+    except Exception:
+        return client.get_database_client(database_name)
+
+def create_container_if_not_exists(database, container_name, indexing_policy, vector_embedding_policy, full_text_policy):
+    """Create container in Cosmos DB if it doesn't exist."""
+    try:
+        return database.create_container(
+            id=container_name,
+            indexing_policy=indexing_policy,
+            full_text_policy=full_text_policy,
+            vector_embedding_policy=vector_embedding_policy,
+            partition_key=PartitionKey(path=PARTITION_KEY),
+            offer_throughput=400
+        )
+    except Exception:
+        return database.get_container_client(container_name)
+
+# Database and container creation
+
+
+
+
+
+
+def search_by_filename(file_name: str) -> bool:
+    """Search Cosmos DB by file name."""
+    query = f"SELECT * FROM c WHERE c.metadata.doc_name = '{file_name}'"
+    results = list(container.query_items(query=query, enable_cross_partition_query=True))
+
+
+    if LOG_FLAG:
+        logger.info(f"[search by file] searched by {file_name}")
+        logger.info(f"[search by file] {len(results)} results: {results}")
+
+    return len(results) > 0
+
+
+
+async def ingest_link_to_cosmos(link_list: List[str]) -> None:
+    """Ingest data scraped from website links into Cosmos DB."""
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        add_start_index=True,
+        separators=get_separators(),
+    )
+
+    batch_size = 32
+
+    for link in link_list:
+        try:
+
+            # Sanitize the link to create a valid file name
+            encoded_link = encode_filename(link)
+            save_path = os.path.join(UPLOADED_FILES_PATH, f"{encoded_link}.txt")
+            content = parse_html([link])[0][0]
+
+            try:
+                exists = search_by_filename(encode_filename(link))
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed when searching in Elasticsearch for file {link}.",
+                )
+
+            if exists:
+                if LOG_FLAG:
+                    logger.info(f"[ upload ] File {link} already exists.")
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Uploaded file {link} already exists. Please change file name.",
+                )
+            
+            if LOG_FLAG:
+                logger.info(f"[ ingest link ] link: {link} content: {content}")
+
+            await save_content_to_local_disk(save_path, content)
+
+            chunks = text_splitter.split_text(content)
+            num_chunks = len(chunks)
+            metadata = dict({"doc_name":  link})
+
+            # Ingest each chunk with vector embedding
+            for i in range(0, num_chunks, batch_size):
+                batch_chunks = chunks[i: i + batch_size]
+                documents = [Document(page_content=text, metadata={**metadata, "id": f"{link}_{i + j}"}) for j, text in enumerate(batch_chunks)]
+
+                try:
+                # Ingest documents to Cosmos DB with vector and text indexing
+                    
+                    vector_search.from_documents(
+                            documents=documents,
+                            embedding= get_embedder(),
+                            cosmos_client=cosmos_client,
+                            vector_embedding_policy=vector_embedding_policy,
+                            indexing_policy=indexing_policy,
+                            cosmos_container_properties=cosmos_container_properties,
+                            cosmos_database_properties={},   
+                            full_text_policy=full_text_policy,
+                    )                   
+                    if LOG_FLAG:
+                        logger.info(f"Processed batch {i // batch_size + 1}/{(num_chunks - 1) // batch_size + 1}")
+                except Exception as e:
+                    logger.error(f"Error occurred while processing batch {i // batch_size + 1}: {str(e)}")
+                    raise HTTPException(status_code=500, detail=f"Error processing batch {i // batch_size + 1}: {str(e)}")
+                
+            if LOG_FLAG:
+                logger.info(f"Document {link} ingested successfully into Cosmos DB.")
+        except Exception as e:
+            logger.error(f"Error occurred while processing the link {link}: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error processing link {link}: {str(e)}")
+
+
+
+@register_microservice(
+    name="opea_service@prepare_doc_elastic",
+    endpoint="/v1/dataprep/get_file",
+    host="0.0.0.0",
+    port=6011,
+)
+async def rag_get_file_structure_from_cosmos() -> list:
+    """Obtain the list of documents stored in Cosmos DB."""
+
+    if LOG_FLAG:
+        logger.info("[ dataprep - get file structure ] start to get file structure from Cosmos DB")
+
+    # Query Cosmos DB for all documents (or filter by a certain field if needed)
+    query = "SELECT c.metadata.doc_name FROM c"
+
+    try:
+        # Execute the query to get the file structure (list of document names)
+        results = list(container.query_items(query=query, enable_cross_partition_query=True))
+        
+        if results:
+            # Extract the document names from the query results
+            file_content = list(dict.fromkeys(result["doc_name"] for result in results))
+
+
+            if LOG_FLAG:
+                logger.info(f"Retrieved file structure from Cosmos DB: {file_content}")
+            
+            return file_content
+        else:
+            if LOG_FLAG:
+                logger.info("No files found in Cosmos DB.")
+            return []
+
+    except exceptions.CosmosHttpResponseError as e:
+        logger.error(f"Error occurred while querying Cosmos DB: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error retrieving file structure from Cosmos DB.")
+
+# Document Ingestion to Cosmos DB
+def ingest_doc_to_cosmos(doc_path: DocPath, file) -> None:
+    """Process document and ingest chunks to Cosmos DB."""
+    path = doc_path.path
+    file_name = os.path.basename(path)
+
+    if LOG_FLAG:
+        logger.info(f"Parsing document {path}, file name: {file_name}.")
+
+    # Select appropriate text splitter based on file type
+    text_splitter = HTMLHeaderTextSplitter(headers_to_split_on=[("h1", "Header 1"), ("h2", "Header 2"), ("h3", "Header 3")]) if path.endswith(".html") else RecursiveCharacterTextSplitter(chunk_size=doc_path.chunk_size, chunk_overlap=doc_path.chunk_overlap, add_start_index=True, separators=get_separators())
+
+    content = document_loader(path)
+    chunks = content if os.path.splitext(path)[-1] in [".xlsx", ".csv", ".json", ".jsonl"] else text_splitter.split_text(content)
+
+    if doc_path.process_table and path.endswith(".pdf"):
+        chunks += get_tables_result(path, doc_path.table_strategy)
+
+    if LOG_FLAG:
+        logger.info(f"Done preprocessing. Created {len(chunks)} chunks of the original file.")
+
+    batch_size = 32
+    num_chunks = len(chunks)
+    metadata = {"doc_name": str(file_name)}
+
+    # Batch ingestion to Cosmos DB
+    for i in range(0, num_chunks, batch_size):
+        batch_chunks = chunks[i:i+batch_size]
+        documents = [Document(page_content=text, metadata={**metadata, "id": f"{file_name}_{i + j}"}) for j, text in enumerate(batch_chunks)]
+
+        try:
+            # Ingest documents to Cosmos DB with vector and text indexing
+
+            if not cosmos_client:
+                logger.error("Cosmos DB client is not initialized.")
+                raise HTTPException(status_code=500, detail="Cosmos DB client is not initialized.")
+            
+            # Validate the embedder function
+            embedder = get_embedder()
+            if embedder is None:
+                logger.error("Embedder function returned None. Cannot perform embedding.")
+                raise HTTPException(status_code=500, detail="Embedding function failed to return a valid embedder.")
+            
+            # Validate that documents have content to embed
+            if not any(doc.page_content for doc in documents):
+                logger.error(f"No content available to embed for the documents in batch {i // batch_size + 1}.")
+                raise HTTPException(status_code=500, detail="Documents have no content to embed.")
+
+
+            vector_search.from_documents(
+                    documents=documents,
+                    embedding= get_embedder(),
+                    cosmos_client=cosmos_client,
+                    vector_embedding_policy=vector_embedding_policy,
+                    indexing_policy=indexing_policy,
+                    cosmos_container_properties=cosmos_container_properties,
+                    cosmos_database_properties={},   
+                    full_text_policy=full_text_policy,
+            )
+            if LOG_FLAG:
+                logger.info(f"Processed batch {i // batch_size + 1}/{(num_chunks - 1) // batch_size + 1}")
+        except Exception as e:
+            logger.error(f"Error occurred while processing batch {i // batch_size + 1}: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error processing batch {i // batch_size + 1}: {str(e)}")
+
+    if LOG_FLAG:
+        logger.info(f"Document {file_name} ingested successfully into Cosmos DB.")
+
+# FastAPI Endpoint for File Upload
+@register_microservice(name="opea_service@prepare_doc_elastic", endpoint="/v1/dataprep", host="0.0.0.0", port=6011)
+async def ingest_documents( files: Optional[Union[UploadFile, List[UploadFile]]] = File(None),
+    link_list: Optional[str] = Form(None),
+    chunk_size: int = Form(1500),
+    chunk_overlap: int = Form(100),
+    process_table: bool = Form(False),
+    table_strategy: str = Form("fast"),):
+    """Handle file upload and process ingestion."""
+
+    if LOG_FLAG:
+        logger.info(f"files:{files}")
+        logger.info(f"link_list:{link_list}")
+
+    if files and link_list:
+        raise HTTPException(status_code=400, detail="Provide either a file or a string list, not both.")
+    
+    if files:
+        if isinstance(files, UploadFile):  # Single file
+            files = [files]
+
+        if not os.path.exists(UPLOADED_FILES_PATH):
+            Path(UPLOADED_FILES_PATH).mkdir(parents=True, exist_ok=True)
+
+        for file in files:
+            encode_file = file.filename
+            save_path = UPLOADED_FILES_PATH + encode_file
+            filename = save_path.split("/")[-1]
+            
+
+            exists = search_by_filename(filename)
+            if exists:
+                if LOG_FLAG:
+                    logger.info(f"[upload] File {file.filename} already exists.")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Uploaded file {file.filename} already exists. Please change the file name.",
+                )
+
+            await save_content_to_local_disk(save_path, file)
+
+            if LOG_FLAG:
+                logger.info(f"Successfully saved file {save_path}.")
+
+            # Ingest to Cosmos DB
+            res = ingest_doc_to_cosmos(
+                DocPath(
+                    path=save_path,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    process_table=process_table,
+                    table_strategy=table_strategy,
+                ) , file
+            )
+
+
+        result = {"status": 200, "message": "Data preparation succeeded"}
+
+        if LOG_FLAG:
+            logger.info(result)
+        return result
+
+    if link_list:
+        try:
+            print("link_list before parsing:", link_list)
+            link_list = json.loads(link_list)  # Parse the string into a list
+            print("link_list after parsing:", link_list)
+            if not isinstance(link_list, list):
+                raise HTTPException(status_code=400, detail="link_list must be a list.")
+            if not all(isinstance(link, str) for link in link_list):
+                raise HTTPException(status_code=400, detail="Each item in link_list must be a string.")
+            
+            await ingest_link_to_cosmos(link_list)
+
+            if LOG_FLAG:
+                logger.info(f"Successfully saved link list {link_list}")
+
+            result = {"status": 200, "message": "Data preparation succeeded"}
+            return result
+
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON format for link_list.")
+        except Exception as e:
+            print(f"Exception occurred: {str(e)}")  # Log the exception for debugging
+            raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+
+def delete_file_from_cosmos(file_path: str):
+    """Delete the file or folder from Cosmos DB based on file_path."""
+    try:
+        # Assuming files are stored with a 'path' field in Cosmos DB documents
+        query = f"SELECT * FROM c WHERE c.metadata.doc_name = '{file_path}'"
+        results = list(container.query_items(query=query, enable_cross_partition_query=True))
+
+        if not results:
+            raise HTTPException(status_code=404, detail="File not found in Cosmos DB.")
+
+        for item in results:
+            # Delete the item representing the file in Cosmos DB
+            container.delete_item(item, partition_key=item['id'])
+        return True
+    except exceptions.CosmosHttpResponseError as e:
+        logger.error(f"Error deleting from Cosmos DB: {e}")
+        return False
+    
+@register_microservice(
+    name="opea_service@prepare_doc_elastic",
+    endpoint="/dataprep/delete_file",
+    host="0.0.0.0",
+    port=6011,
+)
+async def delete_by_doc_name(file_path: str):
+    """Delete all documents where metadata.doc_name matches the specified doc_name."""
+    if file_path == "all":
+        if LOG_FLAG:
+            logger.info("[dataprep - del] delete all files from Cosmos DB")
+        try:
+            # Query to find all files (adjust based on your schema)
+            results = list(container.query_items("SELECT * FROM c", enable_cross_partition_query=True))
+            remove_folder_with_ignore(UPLOADED_FILES_PATH)
+            for item in results:
+                container.delete_item(item, partition_key=item['id'])
+            if LOG_FLAG:
+                logger.info("[dataprep - del] successfully deleted all files from Cosmos DB.")
+            create_upload_folder(UPLOADED_FILES_PATH)
+            return {"status": True}
+        except Exception as e:
+            if LOG_FLAG:
+                logger.error(f"Failed to delete all files from Cosmos DB: {e}")
+            return {"status": False}
+
+    # For specific file or folder deletion in Cosmos DB
+    delete_path = Path(UPLOADED_FILES_PATH + "/" + encode_filename(file_path))
+
+    delete_link = Path(UPLOADED_FILES_PATH + "/" + encode_filename(file_path) + '.txt')
+
+    if LOG_FLAG:
+        logger.info(f"[dataprep - del] delete_path: {delete_path}")
+
+    if delete_path.exists():
+        # Handle file deletion from Cosmos DB
+        if delete_path.is_file():
+            try :
+                assert delete_file_from_cosmos(file_path)
+                delete_path.unlink()
+            except Exception as e:
+                if LOG_FLAG:
+                    logger.info(f"[dataprep - del] fail to delete file {delete_path}: {e}")
+                    logger.info({"status": False})
+                return {"status": False}
+            
+        else:
+            if LOG_FLAG:
+                logger.info("[dataprep - del] delete folder is not supported for now.")
+                logger.info({"status": False})
+            return {"status": False}
+        if LOG_FLAG:
+            logger.info({"status": True})
+        # Handle folder deletion (if folders are represented)
+    elif delete_link.exists():
+        # Handle file deletion from Cosmos DB
+        if delete_link.is_file():
+            try :
+                assert delete_file_from_cosmos(file_path)
+                delete_link.unlink()
+            except Exception as e:
+                if LOG_FLAG:
+                    logger.info(f"[dataprep - del] fail to delete file {delete_link}: {e}")
+                    logger.info({"status": False})
+                return {"status": False}
+            
+        else:
+            if LOG_FLAG:
+                logger.info("[dataprep - del] delete folder is not supported for now.")
+                logger.info({"status": False})
+            return {"status": False}
+        if LOG_FLAG:
+            logger.info({"status": True})
+        # Handle folder deletion (if folders are represented)
+    else:
+        raise HTTPException(status_code=404, detail="File/folder not found in Cosmos DB. Please check the file_path.")
+    
+    
+
+    
+# If running as the main service, start the FastAPI server
+if __name__ == "__main__":
+    try:
+        cosmos_client = CosmosClient(AZURE_COSMOSDB_URI, KEY)
+    except Exception as e:
+        logger.error(f"Can't get instance of CosmosClient: {str(e)}")
+        raise
+    logger.info("CosmosClient initialized")
+    
+    database = create_database_if_not_exists(cosmos_client, DB_NAME)
+    container = create_container_if_not_exists(database, CONTAINER_NAME, indexing_policy, vector_embedding_policy, full_text_policy)
+    partition_key = PartitionKey(path=PARTITION_KEY)
+    cosmos_container_properties = {"partition_key": partition_key}
+
+    vector_search = AzureCosmosDBNoSqlVectorSearch(
+    embedding=get_embedder(),
+    database_name=database,
+    container_name=container,
+    full_text_policy=full_text_policy,
+    text_key=TEXT_KEY,
+    embedding_key=EMBEDDING_KEY,
+    metadata_key= "metadata",
+    create_container=True,
+    cosmos_database_properties={},
+    full_text_search_enabled=True,
+    cosmos_client=cosmos_client,
+    vector_embedding_policy=vector_embedding_policy,
+    indexing_policy=indexing_policy,
+    cosmos_container_properties=cosmos_container_properties
+    )
+    logger.info("VectorStore initialized")
+    opea_microservices["opea_service@prepare_doc_elastic"].start()
