@@ -1,0 +1,62 @@
+1. POST LINK
+
+import json
+import requests
+link_list = json.dumps(["https://en.wikipedia.org/wiki/Generative_artificial_intelligence"])
+response = requests.post("http://127.0.0.1:6011/v1/dataprep", data = {"link_list":link_list})
+
+print(response.json())
+
+
+2. POST FILE 
+
+import requests
+
+# Define the URL of the FastAPI endpoint
+url = "http://127.0.0.1:6011/v1/dataprep"
+
+
+# Open the file to upload
+file_path = r"D:\ML\s.csv"  # Replace with the path to the file you want to upload
+with open(file_path, "rb") as file:
+    # Prepare the files parameter
+    files = {"files": (file.name, file, "application/pdf")}
+    
+    print(files)
+    # Prepare the query parameters
+    params = {"process_table": "true"}  # or use `True` depending on FastAPI's expected input
+
+    # Send the POST request to the FastAPI endpoint
+    response = requests.post(url, files=files, params=params)
+
+# Check the response from the server
+print(response)
+print(response.status_code)
+print(response.json())
+
+
+3. GET FILE
+
+import requests
+import json
+
+url = 'http://127.0.0.1:6011/v1/dataprep/get_file'
+
+# Define the link_list as a stringified JSON format for form data
+
+# Send the request with the correct format (form argument)
+response = requests.post(url)
+
+# Print the response from the server
+print(response.status_code)
+print(response.json())
+
+
+4. DELETE
+
+import requests
+
+# For deleting a specific document
+response = requests.post("http://127.0.0.1:6011/dataprep/delete_file/?file_path=https://en.wikipedia.org/wiki/Generative_artificial_intelligence")
+print(response)
+print(response.json())
