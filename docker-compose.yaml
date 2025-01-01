@@ -1,0 +1,41 @@
+version: "3"
+services:
+  # Cosmos DB Emulator Service (Local development)
+  cosmosdb-emulator:
+    image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
+    container_name: cosmosdb-emulator
+    ports:
+      - "8081:8081"   # Cosmos Emulator HTTP port
+      - "10250:10250" # Cosmos Emulator TCP port
+    environment:
+      - AZURE_COSMOS_EMULATOR_PARTITION_COUNT=5
+      - AZURE_COSMOS_EMULATOR_ENABLE_NAMED_PIPES=True
+      - AZURE_COSMOS_EMULATOR_ENABLE_SSL=False
+      - no_proxy=${no_proxy}
+      - http_proxy=${http_proxy}
+      - https_proxy=${https_proxy}
+    restart: always
+    ipc: host
+    command: /bin/bash -c "sleep 10 && /entrypoint.sh"
+    
+  # Your application service connecting to Cosmos DB
+  dataprep-cosmosdb:
+    image: opea/dataprep-elasticsearch:latest  # Replace with your actual app image
+    container_name: dataprep-cosmosdb
+    ports:
+      - "6011:6011"
+    ipc: host
+    environment:
+      http_proxy: ${http_proxy}
+      https_proxy: ${https_proxy}
+      COSMOSDB_URI: ${COSMOSDB_URI}   # CosmosDB connection string or emulator URI
+      COSMOSDB_KEY: ${COSMOSDB_KEY}   # CosmosDB account key
+      DB_NAME: ${DB_NAME}             # Database name
+      CONTAINER_NAME: ${CONTAINER_NAME}  # Container name (Cosmos DB container)
+      TEI_ENDPOINT: ${TEI_ENDPOINT}
+      HUGGINGFACEHUB_API_TOKEN: ${HUGGINGFACEHUB_API_TOKEN}
+    restart: unless-stopped
+
+networks:
+  default:
+    driver: bridge
