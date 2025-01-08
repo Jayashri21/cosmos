@@ -1,0 +1,51 @@
+Image : 
+
+https://www.google.com/url?sa=i&url=https%3A%2F%2Fbyjus.com%2Fmaths%2Fbar-graph%2F&psig=AOvVaw0HO1KgLZIVxZABsvXqqAGX&ust=1736397477012000&source=images&cd=vfe&opi=89978449&ved=0CBEQjRxqFwoTCPjby-mm5YoDFQAAAAAdAAAAABAK
+
+Output :
+
+TITLE	 
+
+ Month	Shade 1	Shade 2	Shade 3	Shade 4 
+ January	4501	1657	4371	3307 
+ February	2841	5674	5753	6648 
+ March	4015	8908	9792	7763 
+ April	6801	9000	9050	9050 
+ May	3161	5754	5765	7878 
+ June	3408	4571	2324	6531
+
+
+Image : https://www.google.com/url?sa=i&url=https%3A%2F%2Fwww.anychart.com%2Fproducts%2Fanychart%2Fgallery%2F&psig=AOvVaw1u8fnPiC34Cftfq2ynGClE&ust=1736398231685000&source=images&cd=vfe&opi=89978449&ved=0CBQQjRxqFwoTCPj0wNOp5YoDFQAAAAAdAAAAABAJ
+
+Output :
+
+
+TITLE	Trend of Sales of the Most Popular Products of ACME Corp.
+Year	Brandy	Whiskey	Tequila
+1986	6.48	6.31	6.41
+1988	7.23	7.25	6.70
+1990	7.39	13.88	13.91
+1992	14.34	21.00	21.00
+1994	13.86	21.53	20.77
+1996	6.46	13.60	6.76
+1998	7.77	14.03	6.70
+2000	7.41	13.88	6.63
+2002	14.04	14.53	6.76
+2004	14.56	21.61	7.33
+2006	14.31	20.91	3.71
+2007	14.25	20.97	3.24
+2008	14.23	20.97	3.62
+2009	13.67	21.21	7.26
+
+
+Image :
+
+https://www.google.com/url?sa=i&url=https%3A%2F%2Fwww.intellspot.com%2Ftypes-graphs-charts%2F&psig=AOvVaw1u8fnPiC34Cftfq2ynGClE&ust=1736398231685000&source=images&cd=vfe&opi=89978449&ved=0CBQQjRxqFwoTCPj0wNOp5YoDFQAAAAAdAAAAABAh
+
+output : 
+
+TITLE	Types of Transportation to School
+Bus : 35%	0.35% 
+ Walking : 10%	0.10% 
+ Car : 15%	0.15% 
+ Bicycle : 40%	0.40%
